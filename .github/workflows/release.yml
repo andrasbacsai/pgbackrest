@@ -1,0 +1,227 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'pgBackRest version to build (e.g., 2.57.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  PGBACKREST_VERSION: ${{ inputs.version }}
+
+jobs:
+  build-linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    container:
+      image: alpine:3.21
+    steps:
+      - name: Install build dependencies
+        run: |
+          apk add --no-cache \
+            build-base \
+            meson \
+            pkgconf \
+            git \
+            postgresql-dev \
+            openssl-dev \
+            openssl-libs-static \
+            lz4-dev \
+            lz4-static \
+            libxml2-dev \
+            libxml2-static \
+            yaml-dev \
+            yaml-static \
+            zlib-dev \
+            zlib-static \
+            bzip2-dev \
+            bzip2-static \
+            libssh2-dev \
+            libssh2-static \
+            zstd-dev \
+            zstd-static
+
+      - name: Clone pgbackrest
+        run: |
+          git clone --depth 1 --branch "release/${{ env.PGBACKREST_VERSION }}" \
+            https://github.com/pgbackrest/pgbackrest.git
+
+      - name: Configure with Meson (static)
+        run: |
+          cd pgbackrest
+          meson setup build \
+            --buildtype=release \
+            --prefer-static \
+            -Dlibssh2=enabled \
+            -Dlibzstd=enabled
+
+      - name: Build
+        run: |
+          cd pgbackrest
+          ninja -C build
+
+      - name: Verify static binary
+        run: |
+          file pgbackrest/build/src/pgbackrest
+          ldd pgbackrest/build/src/pgbackrest 2>&1 || echo "Static binary confirmed"
+
+      - name: Strip binary
+        run: strip pgbackrest/build/src/pgbackrest
+
+      - name: Create archive
+        run: |
+          ARCHIVE_NAME="pgbackrest-${{ env.PGBACKREST_VERSION }}-linux-${{ matrix.arch }}"
+          mkdir -p "${ARCHIVE_NAME}"
+          cp pgbackrest/build/src/pgbackrest "${ARCHIVE_NAME}/"
+          cp pgbackrest/LICENSE "${ARCHIVE_NAME}/" 2>/dev/null || true
+          tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          sha256sum "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgbackrest-${{ env.PGBACKREST_VERSION }}-linux-${{ matrix.arch }}
+          path: |
+            pgbackrest-*.tar.gz
+            pgbackrest-*.sha256
+
+  build-macos:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: macos-13
+          - arch: arm64
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Install dependencies
+        run: |
+          brew install \
+            meson \
+            pkg-config \
+            postgresql@16 \
+            openssl@3 \
+            lz4 \
+            libxml2 \
+            libyaml \
+            zlib \
+            bzip2 \
+            libssh2 \
+            zstd
+
+      - name: Clone pgbackrest
+        run: |
+          git clone --depth 1 --branch "release/${{ env.PGBACKREST_VERSION }}" \
+            https://github.com/pgbackrest/pgbackrest.git
+
+      - name: Configure with Meson
+        run: |
+          cd pgbackrest
+
+          # Set up pkg-config paths for Homebrew dependencies
+          if [[ "$(uname -m)" == "arm64" ]]; then
+            export PKG_CONFIG_PATH="/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/postgresql@16/lib/pkgconfig:/opt/homebrew/opt/libxml2/lib/pkgconfig:/opt/homebrew/opt/zlib/lib/pkgconfig:/opt/homebrew/opt/bzip2/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
+          else
+            export PKG_CONFIG_PATH="/usr/local/opt/openssl@3/lib/pkgconfig:/usr/local/opt/postgresql@16/lib/pkgconfig:/usr/local/opt/libxml2/lib/pkgconfig:/usr/local/opt/zlib/lib/pkgconfig:/usr/local/opt/bzip2/lib/pkgconfig:/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
+          fi
+
+          meson setup build \
+            --buildtype=release \
+            --prefer-static \
+            -Dlibssh2=enabled \
+            -Dlibzstd=enabled
+
+      - name: Build
+        run: |
+          cd pgbackrest
+          ninja -C build
+
+      - name: Verify binary
+        run: |
+          file pgbackrest/build/src/pgbackrest
+          otool -L pgbackrest/build/src/pgbackrest
+
+      - name: Strip binary
+        run: strip pgbackrest/build/src/pgbackrest
+
+      - name: Create archive
+        run: |
+          ARCHIVE_NAME="pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-${{ matrix.arch }}"
+          mkdir -p "${ARCHIVE_NAME}"
+          cp pgbackrest/build/src/pgbackrest "${ARCHIVE_NAME}/"
+          cp pgbackrest/LICENSE "${ARCHIVE_NAME}/" 2>/dev/null || true
+          tar -czvf "${ARCHIVE_NAME}.tar.gz" "${ARCHIVE_NAME}"
+          shasum -a 256 "${ARCHIVE_NAME}.tar.gz" > "${ARCHIVE_NAME}.tar.gz.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-${{ matrix.arch }}
+          path: |
+            pgbackrest-*.tar.gz
+            pgbackrest-*.sha256
+
+  release:
+    needs: [build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate combined checksums
+        run: |
+          cd artifacts
+          cat *.sha256 > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.PGBACKREST_VERSION }}
+          name: pgBackRest ${{ env.PGBACKREST_VERSION }}
+          draft: false
+          generate_release_notes: false
+          body: |
+            ## pgBackRest ${{ env.PGBACKREST_VERSION }}
+
+            Unofficial pre-built binaries for pgBackRest.
+
+            ### Downloads
+
+            | Platform | Architecture | Download |
+            |----------|--------------|----------|
+            | Linux | amd64 | `pgbackrest-${{ env.PGBACKREST_VERSION }}-linux-amd64.tar.gz` |
+            | Linux | arm64 | `pgbackrest-${{ env.PGBACKREST_VERSION }}-linux-arm64.tar.gz` |
+            | macOS | amd64 (Intel) | `pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-amd64.tar.gz` |
+            | macOS | arm64 (Apple Silicon) | `pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-arm64.tar.gz` |
+
+            ### Verification
+
+            Verify downloads using `checksums.txt`:
+            ```bash
+            sha256sum -c checksums.txt
+            ```
+
+            ### Official Release
+
+            See the [official pgBackRest release notes](https://github.com/pgbackrest/pgbackrest/releases/tag/release/${{ env.PGBACKREST_VERSION }}).
+          files: |
+            artifacts/*.tar.gz
+            artifacts/checksums.txt
