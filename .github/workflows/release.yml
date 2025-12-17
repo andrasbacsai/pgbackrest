@@ -36,6 +36,7 @@ jobs:
             pkgconf \
             git \
             postgresql-dev \
+            libpq-dev \
             openssl-dev \
             openssl-libs-static \
             lz4-dev \
@@ -51,7 +52,8 @@ jobs:
             libssh2-dev \
             libssh2-static \
             zstd-dev \
-            zstd-static
+            zstd-static \
+            musl-dev
 
       - name: Clone pgbackrest
         run: |
@@ -98,15 +100,7 @@ jobs:
             pgbackrest-*.sha256
 
   build-macos:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: macos-13
-          - arch: arm64
-            runner: macos-14
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-14
     steps:
       - name: Install dependencies
         run: |
@@ -123,6 +117,10 @@ jobs:
             libssh2 \
             zstd
 
+      - name: Set up environment
+        run: |
+          echo "PKG_CONFIG_PATH=/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/postgresql@16/lib/pkgconfig:/opt/homebrew/opt/libxml2/lib/pkgconfig:/opt/homebrew/opt/zlib/lib/pkgconfig:/opt/homebrew/opt/bzip2/lib/pkgconfig:/opt/homebrew/lib/pkgconfig" >> $GITHUB_ENV
+
       - name: Clone pgbackrest
         run: |
           git clone --depth 1 --branch "release/${{ env.PGBACKREST_VERSION }}" \
@@ -131,14 +129,6 @@ jobs:
       - name: Configure with Meson
         run: |
           cd pgbackrest
-
-          # Set up pkg-config paths for Homebrew dependencies
-          if [[ "$(uname -m)" == "arm64" ]]; then
-            export PKG_CONFIG_PATH="/opt/homebrew/opt/openssl@3/lib/pkgconfig:/opt/homebrew/opt/postgresql@16/lib/pkgconfig:/opt/homebrew/opt/libxml2/lib/pkgconfig:/opt/homebrew/opt/zlib/lib/pkgconfig:/opt/homebrew/opt/bzip2/lib/pkgconfig:/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
-          else
-            export PKG_CONFIG_PATH="/usr/local/opt/openssl@3/lib/pkgconfig:/usr/local/opt/postgresql@16/lib/pkgconfig:/usr/local/opt/libxml2/lib/pkgconfig:/usr/local/opt/zlib/lib/pkgconfig:/usr/local/opt/bzip2/lib/pkgconfig:/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH"
-          fi
-
           meson setup build \
             --buildtype=release \
             --prefer-static \
@@ -160,7 +150,7 @@ jobs:
 
       - name: Create archive
         run: |
-          ARCHIVE_NAME="pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-${{ matrix.arch }}"
+          ARCHIVE_NAME="pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-arm64"
           mkdir -p "${ARCHIVE_NAME}"
           cp pgbackrest/build/src/pgbackrest "${ARCHIVE_NAME}/"
           cp pgbackrest/LICENSE "${ARCHIVE_NAME}/" 2>/dev/null || true
@@ -170,7 +160,7 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-${{ matrix.arch }}
+          name: pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-arm64
           path: |
             pgbackrest-*.tar.gz
             pgbackrest-*.sha256
@@ -209,7 +199,6 @@ jobs:
             |----------|--------------|----------|
             | Linux | amd64 | `pgbackrest-${{ env.PGBACKREST_VERSION }}-linux-amd64.tar.gz` |
             | Linux | arm64 | `pgbackrest-${{ env.PGBACKREST_VERSION }}-linux-arm64.tar.gz` |
-            | macOS | amd64 (Intel) | `pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-amd64.tar.gz` |
             | macOS | arm64 (Apple Silicon) | `pgbackrest-${{ env.PGBACKREST_VERSION }}-darwin-arm64.tar.gz` |
 
             ### Verification
